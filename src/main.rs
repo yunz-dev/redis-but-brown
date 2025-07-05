@@ -2,22 +2,26 @@ use std::io;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bytes::BytesMut;
-use redust::resp::{parse_value, Value};
+use redust::resp::{parse_value, Value, serialize_value};
+use redust::db::new_db;
+use redust::commands::handle_command;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:6379").await?;
+    let db = new_db();
     println!("Server listening on 127.0.0.1:6379");
 
     loop {
         let (socket, _) = listener.accept().await?;
+        let db_clone = db.clone();
         tokio::spawn(async move {
-            handle_connection(socket).await;
+            handle_connection(socket, db_clone).await;
         });
     }
 }
 
-async fn handle_connection(mut socket: TcpStream) {
+async fn handle_connection(mut socket: TcpStream, db: redust::db::Db) {
     let mut buf = BytesMut::with_capacity(1024);
 
     loop {
@@ -35,17 +39,15 @@ async fn handle_connection(mut socket: TcpStream) {
 
         // Try to parse
         match parse_value(&mut buf) {
-            Ok(Value::Array(arr)) if arr.len() == 1 => {
-                if let Value::BulkString(cmd) = &arr[0] {
-                    if cmd.as_ref() == b"PING" {
-                        let response = b"+PONG\r\n";
-                        if socket.write(response).await.is_err() {
-                            return;
-                        }
+            Ok(Value::Array(arr)) => {
+                if let Some(response) = handle_command(&db, &arr).await {
+                    let serialized = serialize_value(&response);
+                    if socket.write(&serialized).await.is_err() {
+                        return;
                     }
                 }
             }
-            Ok(_) => {} // Ignore other commands for now
+            Ok(_) => {} // Ignore non-array
             Err(_) => {} // Incomplete, wait for more data
         }
     }

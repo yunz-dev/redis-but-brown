@@ -97,6 +97,29 @@ fn read_line(buf: &mut impl Buf) -> Result<String, ParseError> {
     String::from_utf8(line).map_err(|_| ParseError::InvalidFormat)
 }
 
+pub fn serialize_value(value: &Value) -> Vec<u8> {
+    match value {
+        Value::SimpleString(s) => format!("+{}\r\n", s).into_bytes(),
+        Value::Error(s) => format!("-{}\r\n", s).into_bytes(),
+        Value::Integer(i) => format!(":{}\r\n", i).into_bytes(),
+        Value::BulkString(bs) => {
+            let len = bs.len();
+            let mut res = format!("${}\r\n", len).into_bytes();
+            res.extend_from_slice(bs);
+            res.extend_from_slice(b"\r\n");
+            res
+        }
+        Value::Array(arr) => {
+            let mut res = format!("*{}\r\n", arr.len()).into_bytes();
+            for v in arr {
+                res.extend(serialize_value(v));
+            }
+            res
+        }
+        Value::Null => b"$-1\r\n".to_vec(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +184,26 @@ mod tests {
         let mut buf = BytesMut::from("*-1\r\n");
         let value = parse_value(&mut buf).unwrap();
         assert_eq!(value, Value::Null);
+    }
+
+    #[test]
+    fn test_serialize_simple_string() {
+        let value = Value::SimpleString("OK".to_string());
+        let serialized = serialize_value(&value);
+        assert_eq!(serialized, b"+OK\r\n");
+    }
+
+    #[test]
+    fn test_serialize_bulk_string() {
+        let value = Value::BulkString(Bytes::from("hello"));
+        let serialized = serialize_value(&value);
+        assert_eq!(serialized, b"$5\r\nhello\r\n");
+    }
+
+    #[test]
+    fn test_serialize_null() {
+        let value = Value::Null;
+        let serialized = serialize_value(&value);
+        assert_eq!(serialized, b"$-1\r\n");
     }
 }
