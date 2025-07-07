@@ -1,5 +1,5 @@
 use crate::resp::Value;
-use crate::db::Db;
+use crate::db::{Db, DbValue};
 use bytes::Bytes;
 
 pub async fn handle_command(db: &Db, cmd: &[Value]) -> Option<Value> {
@@ -30,7 +30,7 @@ async fn handle_set(db: &Db, args: &[Value]) -> Option<Value> {
     let value = extract_bytes(&args[1])?;
     {
         let mut map = db.write().await;
-        map.insert(key, value);
+        map.insert(key, DbValue::new(value));
     }
     Some(Value::SimpleString("OK".to_string()))
 }
@@ -40,8 +40,16 @@ async fn handle_get(db: &Db, args: &[Value]) -> Option<Value> {
         return None;
     }
     let key = extract_string(&args[0])?;
-    let map = db.read().await;
-    map.get(&key).cloned().map(Value::BulkString).or(Some(Value::Null))
+    let mut map = db.write().await; // Need write to remove if expired
+    if let Some(db_val) = map.get(&key) {
+        if db_val.is_expired() {
+            map.remove(&key);
+            return Some(Value::Null);
+        }
+        Some(Value::BulkString(db_val.data.clone()))
+    } else {
+        Some(Value::Null)
+    }
 }
 
 async fn handle_del(db: &Db, args: &[Value]) -> Option<Value> {
@@ -90,6 +98,25 @@ mod tests {
         ];
         let resp_get = handle_command(&db, &cmd_get).await;
         assert_eq!(resp_get, Some(Value::BulkString(Bytes::from("value"))));
+    }
+
+    #[tokio::test]
+    async fn test_get_expired() {
+        let db = new_db();
+        // Manually insert expired value
+        {
+            let mut map = db.write().await;
+            let mut val = DbValue::new(Bytes::from("value"));
+            val.expiry = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+            map.insert("key".to_string(), val);
+        }
+
+        let cmd_get = vec![
+            Value::BulkString(Bytes::from("GET")),
+            Value::BulkString(Bytes::from("key")),
+        ];
+        let resp_get = handle_command(&db, &cmd_get).await;
+        assert_eq!(resp_get, Some(Value::Null));
     }
 
     #[tokio::test]
