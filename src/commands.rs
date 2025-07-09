@@ -25,6 +25,7 @@ pub async fn handle_command(db: &Db, cmd: &[Value]) -> Option<CommandResult> {
                 "PUBLISH" => handle_publish(db, &cmd[1..]).await.map(CommandResult::Value),
                 "INCR" => handle_incr(db, &cmd[1..]).await.map(CommandResult::Value),
                 "DECR" => handle_decr(db, &cmd[1..]).await.map(CommandResult::Value),
+                "EXISTS" => handle_exists(db, &cmd[1..]).await.map(CommandResult::Value),
                 _ => None,
             }
         }
@@ -170,6 +171,16 @@ async fn handle_decr(db: &Db, args: &[Value]) -> Option<Value> {
     }
 }
 
+async fn handle_exists(db: &Db, args: &[Value]) -> Option<Value> {
+    if args.len() != 1 {
+        return None;
+    }
+    let key = extract_string(&args[0])?;
+    let db_lock = db.read().await;
+    let exists = db_lock.data.get(&key).map_or(false, |v| !v.is_expired());
+    Some(Value::Integer(if exists { 1 } else { 0 }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,5 +319,27 @@ mod tests {
         ];
         let resp = handle_command(&db, &cmd_decr).await;
         assert_eq!(resp, Some(CommandResult::Value(Value::Integer(-1))));
+    }
+
+    #[tokio::test]
+    async fn test_exists() {
+        let db = new_db();
+        let cmd_exists = vec![
+            Value::BulkString(Bytes::from("EXISTS")),
+            Value::BulkString(Bytes::from("key")),
+        ];
+        let resp = handle_command(&db, &cmd_exists).await;
+        assert_eq!(resp, Some(CommandResult::Value(Value::Integer(0))));
+
+        // Set key
+        let cmd_set = vec![
+            Value::BulkString(Bytes::from("SET")),
+            Value::BulkString(Bytes::from("key")),
+            Value::BulkString(Bytes::from("value")),
+        ];
+        handle_command(&db, &cmd_set).await;
+
+        let resp_exists = handle_command(&db, &cmd_exists).await;
+        assert_eq!(resp_exists, Some(CommandResult::Value(Value::Integer(1))));
     }
 }
