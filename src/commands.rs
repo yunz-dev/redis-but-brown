@@ -31,14 +31,24 @@ pub async fn handle_command(db: &Db, cmd: &[Value]) -> Option<CommandResult> {
 }
 
 async fn handle_set(db: &Db, args: &[Value]) -> Option<Value> {
-    if args.len() != 2 {
+    if args.len() < 2 {
         return None;
     }
     let key = extract_string(&args[0])?;
     let value = extract_bytes(&args[1])?;
+    let mut expiry = None;
+    if args.len() >= 4 && matches!(&args[2], Value::BulkString(bs) if bs.as_ref() == b"EX") {
+        if let Value::BulkString(ex_str) = &args[3] {
+            if let Ok(ex_secs) = std::str::from_utf8(ex_str.as_ref()).ok()?.parse::<u64>() {
+                expiry = Some(std::time::Instant::now() + std::time::Duration::from_secs(ex_secs));
+            }
+        }
+    }
+    let mut db_val = DbValue::new(value);
+    db_val.expiry = expiry;
     {
         let mut db_lock = db.write().await;
-        db_lock.data.insert(key, DbValue::new(value));
+        db_lock.data.insert(key, db_val);
     }
     Some(Value::SimpleString("OK".to_string()))
 }
@@ -134,6 +144,30 @@ mod tests {
         ];
         let resp_get = handle_command(&db, &cmd_get).await;
         assert_eq!(resp_get, Some(CommandResult::Value(Value::BulkString(Bytes::from("value")))));
+    }
+
+    #[tokio::test]
+    async fn test_set_with_ttl() {
+        let db = new_db();
+        let cmd = vec![
+            Value::BulkString(Bytes::from("SET")),
+            Value::BulkString(Bytes::from("key")),
+            Value::BulkString(Bytes::from("value")),
+            Value::BulkString(Bytes::from("EX")),
+            Value::BulkString(Bytes::from("1")),
+        ];
+        let resp = handle_command(&db, &cmd).await;
+        assert_eq!(resp, Some(CommandResult::Value(Value::SimpleString("OK".to_string()))));
+
+        // Check expiry is set
+        {
+            let db_lock = db.read().await;
+            if let Some(db_val) = db_lock.data.get("key") {
+                assert!(db_val.expiry.is_some());
+            } else {
+                panic!("Key not found");
+            }
+        }
     }
 
     #[tokio::test]
