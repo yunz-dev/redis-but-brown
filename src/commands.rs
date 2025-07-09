@@ -1,11 +1,32 @@
 use crate::resp::Value;
 use crate::db::{Db, DbValue};
 use bytes::Bytes;
+use tokio::sync::mpsc;
+use glob;
 
 #[derive(Debug, PartialEq)]
 pub enum CommandResult {
     Value(Value),
     Subscribe(String),
+}
+
+async fn handle_keys(db: &Db, args: &[Value]) -> Option<Value> {
+    if args.len() != 1 {
+        return None;
+    }
+    let pattern = extract_string(&args[0])?;
+    let db_lock = db.read().await;
+    let keys: Vec<Value> = db_lock.data.iter()
+        .filter(|(_, v)| !v.is_expired())
+        .filter_map(|(k, _)| {
+            if glob::Pattern::new(&pattern).ok()?.matches(k) {
+                Some(Value::BulkString(Bytes::from(k.clone())))
+            } else {
+                None
+            }
+        })
+        .collect();
+    Some(Value::Array(keys))
 }
 
 pub async fn handle_command(db: &Db, cmd: &[Value]) -> Option<CommandResult> {
@@ -26,6 +47,7 @@ pub async fn handle_command(db: &Db, cmd: &[Value]) -> Option<CommandResult> {
                 "INCR" => handle_incr(db, &cmd[1..]).await.map(CommandResult::Value),
                 "DECR" => handle_decr(db, &cmd[1..]).await.map(CommandResult::Value),
                 "EXISTS" => handle_exists(db, &cmd[1..]).await.map(CommandResult::Value),
+                "KEYS" => handle_keys(db, &cmd[1..]).await.map(CommandResult::Value),
                 _ => None,
             }
         }
@@ -341,5 +363,46 @@ mod tests {
 
         let resp_exists = handle_command(&db, &cmd_exists).await;
         assert_eq!(resp_exists, Some(CommandResult::Value(Value::Integer(1))));
+    }
+
+    #[tokio::test]
+    async fn test_keys() {
+        let db = new_db();
+        // Set some keys
+        let cmd_set1 = vec![
+            Value::BulkString(Bytes::from("SET")),
+            Value::BulkString(Bytes::from("key1")),
+            Value::BulkString(Bytes::from("value1")),
+        ];
+        handle_command(&db, &cmd_set1).await;
+
+        let cmd_set2 = vec![
+            Value::BulkString(Bytes::from("SET")),
+            Value::BulkString(Bytes::from("key2")),
+            Value::BulkString(Bytes::from("value2")),
+        ];
+        handle_command(&db, &cmd_set2).await;
+
+        let cmd_keys = vec![
+            Value::BulkString(Bytes::from("KEYS")),
+            Value::BulkString(Bytes::from("*")),
+        ];
+        let resp = handle_command(&db, &cmd_keys).await;
+        match resp {
+            Some(CommandResult::Value(Value::Array(arr))) => {
+                assert_eq!(arr.len(), 2);
+                // Check if key1 and key2 are in the array
+                let keys: Vec<String> = arr.iter().filter_map(|v| {
+                    if let Value::BulkString(bs) = v {
+                        std::str::from_utf8(bs.as_ref()).ok().map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                }).collect();
+                assert!(keys.contains(&"key1".to_string()));
+                assert!(keys.contains(&"key2".to_string()));
+            }
+            _ => panic!("Expected array"),
+        }
     }
 }
