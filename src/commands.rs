@@ -23,6 +23,8 @@ pub async fn handle_command(db: &Db, cmd: &[Value]) -> Option<CommandResult> {
                 "DEL" => handle_del(db, &cmd[1..]).await.map(CommandResult::Value),
                 "SUBSCRIBE" => handle_subscribe(db, &cmd[1..]).await,
                 "PUBLISH" => handle_publish(db, &cmd[1..]).await.map(CommandResult::Value),
+                "INCR" => handle_incr(db, &cmd[1..]).await.map(CommandResult::Value),
+                "DECR" => handle_decr(db, &cmd[1..]).await.map(CommandResult::Value),
                 _ => None,
             }
         }
@@ -120,6 +122,52 @@ async fn handle_publish(db: &Db, args: &[Value]) -> Option<Value> {
         0
     };
     Some(Value::Integer(count as i64))
+}
+
+async fn handle_incr(db: &Db, args: &[Value]) -> Option<Value> {
+    if args.len() != 1 {
+        return None;
+    }
+    let key = extract_string(&args[0])?;
+    let mut db_lock = db.write().await;
+    if let Some(db_val) = db_lock.data.get_mut(&key) {
+        if db_val.is_expired() {
+            db_lock.data.remove(&key);
+            return Some(Value::Integer(1)); // New value
+        }
+        let current_str = std::str::from_utf8(db_val.data.as_ref()).ok()?;
+        let current: i64 = current_str.parse().ok()?;
+        let new_val = current + 1;
+        db_val.data = Bytes::from(new_val.to_string());
+        Some(Value::Integer(new_val))
+    } else {
+        let new_val = 1;
+        db_lock.data.insert(key, DbValue::new(Bytes::from(new_val.to_string())));
+        Some(Value::Integer(new_val))
+    }
+}
+
+async fn handle_decr(db: &Db, args: &[Value]) -> Option<Value> {
+    if args.len() != 1 {
+        return None;
+    }
+    let key = extract_string(&args[0])?;
+    let mut db_lock = db.write().await;
+    if let Some(db_val) = db_lock.data.get_mut(&key) {
+        if db_val.is_expired() {
+            db_lock.data.remove(&key);
+            return Some(Value::Integer(-1)); // New value
+        }
+        let current_str = std::str::from_utf8(db_val.data.as_ref()).ok()?;
+        let current: i64 = current_str.parse().ok()?;
+        let new_val = current - 1;
+        db_val.data = Bytes::from(new_val.to_string());
+        Some(Value::Integer(new_val))
+    } else {
+        let new_val = -1;
+        db_lock.data.insert(key, DbValue::new(Bytes::from(new_val.to_string())));
+        Some(Value::Integer(new_val))
+    }
 }
 
 #[cfg(test)]
@@ -222,5 +270,43 @@ mod tests {
         let cmd = vec![Value::BulkString(Bytes::from("PING"))];
         let resp = handle_command(&db, &cmd).await;
         assert_eq!(resp, Some(CommandResult::Value(Value::SimpleString("PONG".to_string()))));
+    }
+
+    #[tokio::test]
+    async fn test_incr() {
+        let db = new_db();
+        // Set initial value
+        let cmd_set = vec![
+            Value::BulkString(Bytes::from("SET")),
+            Value::BulkString(Bytes::from("num")),
+            Value::BulkString(Bytes::from("5")),
+        ];
+        handle_command(&db, &cmd_set).await;
+
+        let cmd_incr = vec![
+            Value::BulkString(Bytes::from("INCR")),
+            Value::BulkString(Bytes::from("num")),
+        ];
+        let resp = handle_command(&db, &cmd_incr).await;
+        assert_eq!(resp, Some(CommandResult::Value(Value::Integer(6))));
+
+        // Check value
+        let cmd_get = vec![
+            Value::BulkString(Bytes::from("GET")),
+            Value::BulkString(Bytes::from("num")),
+        ];
+        let resp_get = handle_command(&db, &cmd_get).await;
+        assert_eq!(resp_get, Some(CommandResult::Value(Value::BulkString(Bytes::from("6")))));
+    }
+
+    #[tokio::test]
+    async fn test_decr() {
+        let db = new_db();
+        let cmd_decr = vec![
+            Value::BulkString(Bytes::from("DECR")),
+            Value::BulkString(Bytes::from("num")),
+        ];
+        let resp = handle_command(&db, &cmd_decr).await;
+        assert_eq!(resp, Some(CommandResult::Value(Value::Integer(-1))));
     }
 }
