@@ -1,6 +1,6 @@
 # Redis: but its brown
 
-![Redis but brown](assets/redis-but-brown.jpg)
+<img src="assets/redis-but-brown.jpg" width="400" alt="Redis but brown">
 
 Yeah, I wrote it in rust for fun :D
 
