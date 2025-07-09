@@ -2,7 +2,13 @@ use crate::resp::Value;
 use crate::db::{Db, DbValue};
 use bytes::Bytes;
 
-pub async fn handle_command(db: &Db, cmd: &[Value]) -> Option<Value> {
+#[derive(Debug, PartialEq)]
+pub enum CommandResult {
+    Value(Value),
+    Subscribe(String),
+}
+
+pub async fn handle_command(db: &Db, cmd: &[Value]) -> Option<CommandResult> {
     if cmd.is_empty() {
         return None;
     }
@@ -11,10 +17,12 @@ pub async fn handle_command(db: &Db, cmd: &[Value]) -> Option<Value> {
         Value::BulkString(bs) => {
             let cmd_str = std::str::from_utf8(bs.as_ref()).ok()?;
             match cmd_str.to_uppercase().as_str() {
-                "PING" => Some(Value::SimpleString("PONG".to_string())),
-                "SET" => handle_set(db, &cmd[1..]).await,
-                "GET" => handle_get(db, &cmd[1..]).await,
-                "DEL" => handle_del(db, &cmd[1..]).await,
+                "PING" => Some(CommandResult::Value(Value::SimpleString("PONG".to_string()))),
+                "SET" => handle_set(db, &cmd[1..]).await.map(CommandResult::Value),
+                "GET" => handle_get(db, &cmd[1..]).await.map(CommandResult::Value),
+                "DEL" => handle_del(db, &cmd[1..]).await.map(CommandResult::Value),
+                "SUBSCRIBE" => handle_subscribe(db, &cmd[1..]).await,
+                "PUBLISH" => handle_publish(db, &cmd[1..]).await.map(CommandResult::Value),
                 _ => None,
             }
         }
@@ -29,8 +37,8 @@ async fn handle_set(db: &Db, args: &[Value]) -> Option<Value> {
     let key = extract_string(&args[0])?;
     let value = extract_bytes(&args[1])?;
     {
-        let mut map = db.write().await;
-        map.insert(key, DbValue::new(value));
+        let mut db_lock = db.write().await;
+        db_lock.data.insert(key, DbValue::new(value));
     }
     Some(Value::SimpleString("OK".to_string()))
 }
@@ -40,10 +48,10 @@ async fn handle_get(db: &Db, args: &[Value]) -> Option<Value> {
         return None;
     }
     let key = extract_string(&args[0])?;
-    let mut map = db.write().await; // Need write to remove if expired
-    if let Some(db_val) = map.get(&key) {
+    let mut db_lock = db.write().await; // Need write to remove if expired
+    if let Some(db_val) = db_lock.data.get(&key) {
         if db_val.is_expired() {
-            map.remove(&key);
+            db_lock.data.remove(&key);
             return Some(Value::Null);
         }
         Some(Value::BulkString(db_val.data.clone()))
@@ -57,8 +65,8 @@ async fn handle_del(db: &Db, args: &[Value]) -> Option<Value> {
         return None;
     }
     let key = extract_string(&args[0])?;
-    let mut map = db.write().await;
-    let count = if map.remove(&key).is_some() { 1 } else { 0 };
+    let mut db_lock = db.write().await;
+    let count = if db_lock.data.remove(&key).is_some() { 1 } else { 0 };
     Some(Value::Integer(count))
 }
 
@@ -76,6 +84,34 @@ fn extract_bytes(value: &Value) -> Option<Bytes> {
     }
 }
 
+async fn handle_subscribe(db: &Db, args: &[Value]) -> Option<CommandResult> {
+    if args.len() != 1 {
+        return None;
+    }
+    let channel = extract_string(&args[0])?;
+    Some(CommandResult::Subscribe(channel))
+}
+
+async fn handle_publish(db: &Db, args: &[Value]) -> Option<Value> {
+    if args.len() != 2 {
+        return None;
+    }
+    let channel = extract_string(&args[0])?;
+    let message = extract_bytes(&args[1])?;
+    let mut db_lock = db.write().await;
+    let count = if let Some(senders) = db_lock.channels.get_mut(&channel) {
+        let initial_count = senders.len();
+        senders.retain(|sender| {
+            // Try to send, remove if failed
+            sender.try_send(message.clone()).is_ok()
+        });
+        initial_count
+    } else {
+        0
+    };
+    Some(Value::Integer(count as i64))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,14 +126,14 @@ mod tests {
             Value::BulkString(Bytes::from("value")),
         ];
         let resp = handle_command(&db, &cmd).await;
-        assert_eq!(resp, Some(Value::SimpleString("OK".to_string())));
+        assert_eq!(resp, Some(CommandResult::Value(Value::SimpleString("OK".to_string()))));
 
         let cmd_get = vec![
             Value::BulkString(Bytes::from("GET")),
             Value::BulkString(Bytes::from("key")),
         ];
         let resp_get = handle_command(&db, &cmd_get).await;
-        assert_eq!(resp_get, Some(Value::BulkString(Bytes::from("value"))));
+        assert_eq!(resp_get, Some(CommandResult::Value(Value::BulkString(Bytes::from("value")))));
     }
 
     #[tokio::test]
@@ -105,10 +141,10 @@ mod tests {
         let db = new_db();
         // Manually insert expired value
         {
-            let mut map = db.write().await;
+            let mut db_lock = db.write().await;
             let mut val = DbValue::new(Bytes::from("value"));
             val.expiry = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
-            map.insert("key".to_string(), val);
+            db_lock.data.insert("key".to_string(), val);
         }
 
         let cmd_get = vec![
@@ -116,7 +152,7 @@ mod tests {
             Value::BulkString(Bytes::from("key")),
         ];
         let resp_get = handle_command(&db, &cmd_get).await;
-        assert_eq!(resp_get, Some(Value::Null));
+        assert_eq!(resp_get, Some(CommandResult::Value(Value::Null)));
     }
 
     #[tokio::test]
@@ -135,7 +171,7 @@ mod tests {
             Value::BulkString(Bytes::from("key")),
         ];
         let resp = handle_command(&db, &cmd_del).await;
-        assert_eq!(resp, Some(Value::Integer(1)));
+        assert_eq!(resp, Some(CommandResult::Value(Value::Integer(1))));
 
         // Get after del
         let cmd_get = vec![
@@ -143,7 +179,7 @@ mod tests {
             Value::BulkString(Bytes::from("key")),
         ];
         let resp_get = handle_command(&db, &cmd_get).await;
-        assert_eq!(resp_get, Some(Value::Null));
+        assert_eq!(resp_get, Some(CommandResult::Value(Value::Null)));
     }
 
     #[tokio::test]
@@ -151,6 +187,6 @@ mod tests {
         let db = new_db();
         let cmd = vec![Value::BulkString(Bytes::from("PING"))];
         let resp = handle_command(&db, &cmd).await;
-        assert_eq!(resp, Some(Value::SimpleString("PONG".to_string())));
+        assert_eq!(resp, Some(CommandResult::Value(Value::SimpleString("PONG".to_string()))));
     }
 }

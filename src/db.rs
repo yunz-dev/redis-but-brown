@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc::Sender};
 use bytes::Bytes;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -10,10 +10,18 @@ pub struct DbValue {
     pub expiry: Option<Instant>,
 }
 
-pub type Db = Arc<RwLock<HashMap<String, DbValue>>>;
+pub struct Database {
+    pub data: HashMap<String, DbValue>,
+    pub channels: HashMap<String, Vec<Sender<Bytes>>>,
+}
+
+pub type Db = Arc<RwLock<Database>>;
 
 pub fn new_db() -> Db {
-    Arc::new(RwLock::new(HashMap::new()))
+    Arc::new(RwLock::new(Database {
+        data: HashMap::new(),
+        channels: HashMap::new(),
+    }))
 }
 
 impl DbValue {
@@ -36,26 +44,26 @@ mod tests {
 
         // SET
         {
-            let mut map = db.write().await;
-            map.insert("key".to_string(), DbValue::new(Bytes::from("value")));
+            let mut db_lock = db.write().await;
+            db_lock.data.insert("key".to_string(), DbValue::new(Bytes::from("value")));
         }
 
         // GET
         {
-            let map = db.read().await;
-            assert_eq!(map.get("key").map(|v| &v.data), Some(&Bytes::from("value")));
+            let db_lock = db.read().await;
+            assert_eq!(db_lock.data.get("key").map(|v| &v.data), Some(&Bytes::from("value")));
         }
 
         // DEL
         {
-            let mut map = db.write().await;
-            map.remove("key");
+            let mut db_lock = db.write().await;
+            db_lock.data.remove("key");
         }
 
         // GET after del
         {
-            let map = db.read().await;
-            assert_eq!(map.get("key"), None);
+            let db_lock = db.read().await;
+            assert_eq!(db_lock.data.get("key"), None);
         }
     }
 
@@ -66,19 +74,19 @@ mod tests {
         val.expiry = Some(Instant::now() - Duration::from_secs(1)); // Expired
 
         {
-            let mut map = db.write().await;
-            map.insert("key".to_string(), val);
+            let mut db_lock = db.write().await;
+            db_lock.data.insert("key".to_string(), val);
         }
 
         // GET should return null and remove
         {
-            let mut map = db.write().await;
-            if let Some(db_val) = map.get("key") {
+            let mut db_lock = db.write().await;
+            if let Some(db_val) = db_lock.data.get("key") {
                 if db_val.is_expired() {
-                    map.remove("key");
+                    db_lock.data.remove("key");
                 }
             }
-            assert_eq!(map.get("key"), None);
+            assert_eq!(db_lock.data.get("key"), None);
         }
     }
 }
