@@ -1,5 +1,7 @@
 # Redis: but its brown
 
+![Redis but brown](assets/redis-but-brown.jpg)
+
 Yeah, I wrote it in rust for fun :D
 
 ## Features
@@ -36,4 +38,3 @@ GET key
 - **Math**: `INCR counter` → 1, 2, 3...
 - **Keys**: `KEYS *` → all keys
 - **Pub/Sub**: Subscribe in one terminal, publish in another.
-
