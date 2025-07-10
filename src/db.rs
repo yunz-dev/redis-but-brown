@@ -5,8 +5,14 @@ use tokio::sync::{RwLock, mpsc::Sender};
 use bytes::Bytes;
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum DataType {
+    String(Bytes),
+    List(Vec<Bytes>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct DbValue {
-    pub data: Bytes,
+    pub data: DataType,
     pub expiry: Option<Instant>,
 }
 
@@ -25,8 +31,12 @@ pub fn new_db() -> Db {
 }
 
 impl DbValue {
-    pub fn new(data: Bytes) -> Self {
-        Self { data, expiry: None }
+    pub fn new_string(data: Bytes) -> Self {
+        Self { data: DataType::String(data), expiry: None }
+    }
+
+    pub fn new_list(data: Vec<Bytes>) -> Self {
+        Self { data: DataType::List(data), expiry: None }
     }
 
     pub fn is_expired(&self) -> bool {
@@ -45,13 +55,16 @@ mod tests {
         // SET
         {
             let mut db_lock = db.write().await;
-            db_lock.data.insert("key".to_string(), DbValue::new(Bytes::from("value")));
+            db_lock.data.insert("key".to_string(), DbValue::new_string(Bytes::from("value")));
         }
 
         // GET
         {
             let db_lock = db.read().await;
-            assert_eq!(db_lock.data.get("key").map(|v| &v.data), Some(&Bytes::from("value")));
+            match db_lock.data.get("key").map(|v| &v.data) {
+                Some(DataType::String(bs)) => assert_eq!(bs, &Bytes::from("value")),
+                _ => panic!("Expected string"),
+            }
         }
 
         // DEL
@@ -70,7 +83,7 @@ mod tests {
     #[tokio::test]
     async fn test_expiry() {
         let db = new_db();
-        let mut val = DbValue::new(Bytes::from("value"));
+        let mut val = DbValue::new_string(Bytes::from("value"));
         val.expiry = Some(Instant::now() - Duration::from_secs(1)); // Expired
 
         {

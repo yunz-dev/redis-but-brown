@@ -69,7 +69,7 @@ async fn handle_set(db: &Db, args: &[Value]) -> Option<Value> {
             }
         }
     }
-    let mut db_val = DbValue::new(value);
+    let mut db_val = DbValue::new_string(value);
     db_val.expiry = expiry;
     {
         let mut db_lock = db.write().await;
